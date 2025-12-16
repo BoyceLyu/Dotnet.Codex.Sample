@@ -1,59 +1,59 @@
-﻿using System.Text;
+using System.Linq;
+using System.Text;
 using System.Text.Json;
 using Dotnet.Codex.Sample;
 using Dotnet.Codex.Sample.Tools;
 
+const string ModeChat = "chat";
+const string ModeMcp = "mcp";
+const string ModeTrun = "trun";
+const string ModeReact = "react";
+
 var argsMap = ArgParser.Parse(args);
-var mode = argsMap.GetValueOrDefault("mode")?.ToLowerInvariant() ?? "chat";
+var mode = argsMap.GetValueOrDefault("mode")?.ToLowerInvariant() ?? ModeChat;
 
 switch (mode)
 {
-	case "chat":
-		await RunChatAsync(argsMap);
-		break;
-	case "mcp":
-		await RunMcpAsync();
-		break;
-	default:
-		Console.Error.WriteLine($"未知模式: {mode}. 可选 chat | mcp");
-		break;
+        case ModeChat:
+                await RunChatAsync(argsMap);
+                break;
+        case ModeMcp:
+                await RunMcpAsync();
+                break;
+        case ModeTrun:
+                await RunToolRunAsync(argsMap);
+                break;
+        case ModeReact:
+                await RunReactAsync(argsMap);
+                break;
+        default:
+                Console.Error.WriteLine($"未知模式: {mode}. 可选 chat | mcp | trun | react");
+                break;
 }
 
 static async Task RunChatAsync(Dictionary<string, string?> argsMap)
 {
-	if (!OpenAiChatClient.TryCreateFromEnvironment(
-		    argsMap.GetValueOrDefault("model"),
-		    out var client,
-		    out var error))
-	{
-		Console.Error.WriteLine(error);
-		return;
-	}
+        if (!OpenAiChatClient.TryCreateFromEnvironment(
+                    argsMap.GetValueOrDefault("model"),
+                    out var client,
+                    out var error))
+        {
+                Console.Error.WriteLine(error);
+                return;
+        }
 
-	var userMessage = argsMap.GetValueOrDefault("message");
+        var userMessage = ReadUserMessage(argsMap);
 
-	if (string.IsNullOrWhiteSpace(userMessage))
-	{
-		Console.WriteLine("请输入用户问题，然后按回车（空行结束）：");
-		var sb = new StringBuilder();
-		string? line;
-		while (!string.IsNullOrEmpty(line = Console.ReadLine()))
-		{
-			sb.AppendLine(line);
-		}
-		userMessage = sb.ToString().Trim();
-	}
+        if (string.IsNullOrWhiteSpace(userMessage))
+        {
+                Console.Error.WriteLine("未提供用户输入，结束。");
+                return;
+        }
 
-	if (string.IsNullOrWhiteSpace(userMessage))
-	{
-		Console.Error.WriteLine("未提供用户输入，结束。");
-		return;
-	}
-
-	using var chatClient = client;
-	string content;
-	try
-	{
+        using var chatClient = client;
+        string content;
+        try
+        {
 		content = await chatClient.GetChatCompletionAsync(Prompts.SystemPromptZh, userMessage);
 	}
 	catch (Exception ex)
@@ -68,9 +68,139 @@ static async Task RunChatAsync(Dictionary<string, string?> argsMap)
 
 static async Task RunMcpAsync()
 {
-	Console.Error.WriteLine("启动 MCP 演示服务器，使用 STDIN/STDOUT 传输 JSON-RPC。");
-	var server = new McpServer(ToolCatalog.All());
-	await server.RunAsync();
+        Console.Error.WriteLine("启动 MCP 演示服务器，使用 STDIN/STDOUT 传输 JSON-RPC。");
+        var server = new McpServer(ToolCatalog.All());
+        await server.RunAsync();
+}
+
+static async Task RunToolRunAsync(Dictionary<string, string?> argsMap)
+{
+        var toolName = argsMap.GetValueOrDefault("tool");
+        if (string.IsNullOrWhiteSpace(toolName))
+        {
+                Console.Error.WriteLine("trun 模式需要传入 --tool <工具名>。可用工具请查看 README 或 tools/list 接口。");
+                return;
+        }
+
+        var tools = ToolCatalog.All();
+        var tool = tools.FirstOrDefault(t => string.Equals(t.Name, toolName, StringComparison.OrdinalIgnoreCase));
+        if (tool is null)
+        {
+                Console.Error.WriteLine($"未找到工具: {toolName}");
+                return;
+        }
+
+        JsonElement? arguments = null;
+        var rawArgs = argsMap.GetValueOrDefault("args");
+        if (!string.IsNullOrWhiteSpace(rawArgs))
+        {
+                if (!TryParseJson(rawArgs, out var parsedArgs))
+                {
+                        Console.Error.WriteLine("无法解析 --args JSON，示例：--args '{\"path\":\"foo.txt\"}'");
+                        return;
+                }
+                arguments = parsedArgs.RootElement.Clone();
+        }
+
+        var result = await tool.Handler(arguments);
+        Console.WriteLine("=== 工具输出 ===");
+        Console.WriteLine(result);
+}
+
+static async Task RunReactAsync(Dictionary<string, string?> argsMap)
+{
+        if (!OpenAiChatClient.TryCreateFromEnvironment(
+                    argsMap.GetValueOrDefault("model"),
+                    out var client,
+                    out var error))
+        {
+                Console.Error.WriteLine(error);
+                return;
+        }
+
+        var userMessage = ReadUserMessage(argsMap);
+        if (string.IsNullOrWhiteSpace(userMessage))
+        {
+                Console.Error.WriteLine("未提供用户输入，结束。");
+                return;
+        }
+
+        var tools = ToolCatalog.All();
+        var messages = new List<ChatMessage>
+        {
+                new("system", Prompts.BuildReactSystemPrompt(tools)),
+                new("user", userMessage)
+        };
+
+        using var chatClient = client;
+
+        while (true)
+        {
+                string assistantMessage;
+                try
+                {
+                        assistantMessage = await chatClient.GetChatCompletionAsync(messages);
+                }
+                catch (Exception ex)
+                {
+                        Console.Error.WriteLine(ex.Message);
+                        return;
+                }
+
+                if (!TryParseJson(assistantMessage, out var json))
+                {
+                        Console.Error.WriteLine($"LLM 回复无法解析为 JSON: {assistantMessage}");
+                        return;
+                }
+
+                var root = json.RootElement;
+
+                if (root.TryGetProperty("final", out var finalMessage) && finalMessage.ValueKind == JsonValueKind.String)
+                {
+                        Console.WriteLine("=== AI 最终回复 ===");
+                        Console.WriteLine(finalMessage.GetString());
+                        return;
+                }
+
+                if (!root.TryGetProperty("action", out var actionProperty))
+                {
+                        Console.Error.WriteLine($"缺少 action 字段: {assistantMessage}");
+                        return;
+                }
+
+                var actionName = actionProperty.GetString();
+                if (string.IsNullOrWhiteSpace(actionName))
+                {
+                        Console.Error.WriteLine($"action 字段为空: {assistantMessage}");
+                        return;
+                }
+
+                var tool = tools.FirstOrDefault(t => string.Equals(t.Name, actionName, StringComparison.OrdinalIgnoreCase));
+                if (tool is null)
+                {
+                        Console.Error.WriteLine($"未找到工具: {actionName}");
+                        return;
+                }
+
+                JsonElement? args = null;
+                if (root.TryGetProperty("input", out var inputProperty))
+                {
+                        args = inputProperty;
+                }
+
+                string observation;
+                try
+                {
+                        observation = await tool.Handler(args);
+                }
+                catch (Exception ex)
+                {
+                        observation = $"工具执行异常: {ex.Message}";
+                }
+
+                messages.Add(new ChatMessage("assistant", assistantMessage));
+                messages.Add(new ChatMessage("user", $"工具 {actionName} 输出:\n{ToolHelpers.TruncateForDisplay(observation)}"));
+        }
 }
 
 internal static class ArgParser
@@ -102,14 +232,74 @@ internal static class ArgParser
 
 internal static class Prompts
 {
-	public const string SystemPromptZh =
-		"""
-		你是 GitHub Copilot，一名资深 AI 编程助手。
-		- 当被问及正在使用的模型时，回答 “GPT-5.1-Codex-Max (Preview)”。
-		- 拒绝生成有害、仇恨、色情或暴力的内容，改为回复 "Sorry, I can't assist with that."。
-		- 输出保持简洁、准确，可读；提供代码时优先给出最小可运行示例。
-		- 遇到不确定的需求时，先澄清再行动。
-		""";
+        public const string SystemPromptZh =
+                """
+                你是 GitHub Copilot，一名资深 AI 编程助手。
+                - 当被问及正在使用的模型时，回答 “GPT-5.1-Codex-Max (Preview)”。
+                - 拒绝生成有害、仇恨、色情或暴力的内容，改为回复 "Sorry, I can't assist with that."。
+                - 输出保持简洁、准确，可读；提供代码时优先给出最小可运行示例。
+                - 遇到不确定的需求时，先澄清再行动。
+                """;
+
+        public static string BuildReactSystemPrompt(IEnumerable<McpTool> tools)
+        {
+                var toolsList = string.Join('\n', tools.Select(t => $"- {t.Name}: {t.Description}"));
+
+                return
+                        $"""
+你是 GitHub Copilot，一名资深 AI 编程助手。可以使用下列工具解决任务：
+{toolsList}
+
+请遵循 ReAct 思路：先在心里推理，再决定是否调用工具。回复必须是 JSON 对象且不要出现额外文字：
+- 调用工具时，返回 {{"action":"<tool_name>","input":{{...}}}}
+- 完成任务时，返回 {{"final":"<答案文本>"}}
+"""";
+        }
+}
+
+static string? ReadUserMessage(Dictionary<string, string?> argsMap)
+{
+        var userMessage = argsMap.GetValueOrDefault("message");
+
+        if (string.IsNullOrWhiteSpace(userMessage))
+        {
+                Console.WriteLine("请输入用户问题，然后按回车（空行结束）：");
+                var sb = new StringBuilder();
+                string? line;
+                while (!string.IsNullOrEmpty(line = Console.ReadLine()))
+                {
+                        sb.AppendLine(line);
+                }
+
+                userMessage = sb.ToString().Trim();
+        }
+
+        return userMessage;
+}
+
+static bool TryParseJson(string content, out JsonDocument document)
+{
+        var start = content.IndexOf('{');
+        var end = content.LastIndexOf('}');
+
+        if (start < 0 || end < start)
+        {
+                document = null!;
+                return false;
+        }
+
+        var json = content[start..(end + 1)];
+
+        try
+        {
+                document = JsonDocument.Parse(json);
+                return true;
+        }
+        catch (JsonException)
+        {
+                document = null!;
+                return false;
+        }
 }
 
 internal sealed class McpServer

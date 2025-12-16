@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Linq;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -44,44 +45,55 @@ internal sealed class OpenAiChatClient : IDisposable
 		return true;
 	}
 
-	public async Task<string> GetChatCompletionAsync(
-		string systemPrompt,
-		string userMessage,
-		CancellationToken cancellationToken = default)
-	{
-		var payload = new
-		{
-			model = _model,
-			messages = new object[]
-			{
-				new { role = "system", content = systemPrompt },
-				new { role = "user", content = userMessage }
-			}
-		};
+        public async Task<string> GetChatCompletionAsync(
+                string systemPrompt,
+                string userMessage,
+                CancellationToken cancellationToken = default)
+        {
+                var messages = new[]
+                {
+                        new ChatMessage("system", systemPrompt),
+                        new ChatMessage("user", userMessage)
+                };
 
-		var json = JsonSerializer.Serialize(payload);
-		using var content = new StringContent(json, Encoding.UTF8, "application/json");
+                return await GetChatCompletionAsync(messages, cancellationToken);
+        }
 
-		var response = await _httpClient.PostAsync("/chat/completions", content, cancellationToken);
-		var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+        public async Task<string> GetChatCompletionAsync(
+                IEnumerable<ChatMessage> messages,
+                CancellationToken cancellationToken = default)
+        {
+                var payload = new
+                {
+                        model = _model,
+                        messages = messages.Select(m => new { role = m.Role, content = m.Content })
+                };
 
-		if (!response.IsSuccessStatusCode)
-		{
-			throw new InvalidOperationException($"OpenAI 调用失败: {response.StatusCode}\n{responseBody}");
-		}
+                var json = JsonSerializer.Serialize(payload);
+                using var content = new StringContent(json, Encoding.UTF8, "application/json");
 
-		using var document = JsonDocument.Parse(responseBody);
-		var root = document.RootElement;
+                var response = await _httpClient.PostAsync("/chat/completions", content, cancellationToken);
+                var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
 
-		return root.GetProperty("choices")[0]
-			.GetProperty("message")
-			.GetProperty("content")
-			.GetString()
-			   ?? string.Empty;
-	}
+                if (!response.IsSuccessStatusCode)
+                {
+                        throw new InvalidOperationException($"OpenAI 调用失败: {response.StatusCode}\n{responseBody}");
+                }
+
+                using var document = JsonDocument.Parse(responseBody);
+                var root = document.RootElement;
+
+                return root.GetProperty("choices")[0]
+                        .GetProperty("message")
+                        .GetProperty("content")
+                        .GetString()
+                           ?? string.Empty;
+        }
 
 	public void Dispose()
 	{
-		_httpClient.Dispose();
-	}
+                _httpClient.Dispose();
+        }
 }
+
+internal sealed record ChatMessage(string Role, string Content);

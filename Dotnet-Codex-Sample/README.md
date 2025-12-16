@@ -2,6 +2,7 @@
 
 一个自包含的 .NET 控制台示例，用最少代码演示：
 - 调用 OpenAI Chat Completions（含中文版 Codex 系统提示词）。
+- 运行 ReAct 循环：模型返回 JSON 指令，自动调用演示版工具再继续对话。
 - 运行简易 MCP 服务器（JSON-RPC over stdin/stdout，覆盖 Codex 工具全集的演示实现）。
 
 ## 准备
@@ -24,6 +25,24 @@ cd Dotnet-Codex-Sample/Dotnet.Codex.Sample
 ```powershell
  dotnet run -- --model gpt-4.1 --message "给我一个分层架构示例"
 ```
+
+## 运行 ReAct 演示
+```powershell
+cd Dotnet-Codex-Sample/Dotnet.Codex.Sample
+ dotnet run -- --mode react --message "在根目录列出文件再生成总结"
+```
+- 模型按提示只返回 JSON，形如 `{ "action": "list_dir", "input": {"path": "."} }`。
+- 进程自动执行工具，附加输出后继续提问，直至模型返回 `{ "final": "..." }`。
+
+## 运行单次工具调用（trun 模式）
+```powershell
+cd Dotnet-Codex-Sample/Dotnet.Codex.Sample
+ dotnet run -- --mode trun --tool time
+
+# 传入 JSON 参数
+ dotnet run -- --mode trun --tool read_file --args '{"path":"README.md"}'
+```
+`trun` 模式会直接调用演示工具，便于快速验证 schema/handler。
 
 ## 运行 MCP 演示服务器
 ```powershell
